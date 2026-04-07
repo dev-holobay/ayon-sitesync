@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import typing
 from pydantic import Field, validator
 
@@ -167,6 +169,29 @@ class LocalSubmodel(BaseSettingsModel):
         title="Local roots overrides",
         scope=["site"],
         description="Overrides for local root(s)."
+    )
+
+    auto_sync_enabled: bool = Field(
+        False,
+        title="Enable Auto-sync",
+        scope=["site"],
+        description=(
+            "Automatically download new representations from remote site. "
+            "When enabled, representations will be queued for download based on "
+            "the product type filter below."
+        )
+    )
+
+    auto_sync_product_types: list[str] = Field(
+        default_factory=list,
+        title="Auto-sync Product Types Filter",
+        scope=["site"],
+        description=(
+            "Filter which product types to automatically sync. "
+            "Leave EMPTY to sync ALL product types. "
+            "To sync only specific types, add them to the list. "
+            "Example: ['usd', 'abc', 'camera'] syncs only USD, Alembic, and Camera products."
+        )
     )
 
 

@@ -491,6 +491,113 @@ class SiteSyncThread(threading.Thread):
 
         return handler, remote_provider, limit
 
+    async def _auto_discover_representations(
+        self, project_name, local_site, remote_site, preset
+    ):
+        """Auto-discover representations on remote site and add local site if product type matches.
+
+        This enables automatic downloading of new representations based on product type filters.
+
+        Behavior:
+            - If auto_sync_enabled=False: Skip auto-discovery
+            - If auto_sync_enabled=True and filter is empty: Sync ALL product types
+            - If auto_sync_enabled=True and filter has values: Sync only those types
+        """
+        from ayon_api import get_products, get_versions, get_representations
+        from ayon_core.lib import get_local_site_id
+        from .utils import SiteSyncStatus
+
+        # Check if auto-sync is enabled
+        local_setting = preset.get("local_setting", {})
+        auto_sync_enabled = local_setting.get("auto_sync_enabled", False)
+
+        if not auto_sync_enabled:
+            # Auto-sync is disabled, skip
+            return
+
+        # Only run auto-discovery if this is the actual local machine
+        # (not a studio sync service pretending to be remote)
+        if local_site != get_local_site_id():
+            return
+
+        # Get auto-sync product type filter from settings
+        auto_sync_types = local_setting.get("auto_sync_product_types", [])
+
+        # Empty list = sync ALL product types
+        sync_all_types = len(auto_sync_types) == 0
+
+        if sync_all_types:
+            self.log.debug("Auto-discovering ALL product types from remote")
+        else:
+            self.log.debug(
+                f"Auto-discovering representations for product types: {auto_sync_types}"
+            )
+
+        # Get all products, optionally filtering by type
+        products_by_id = {}
+        for product in get_products(project_name):
+            product_type = product.get("productType")
+            # Include product if: syncing all types OR product type in filter
+            if sync_all_types or product_type in auto_sync_types:
+                products_by_id[product["id"]] = product
+
+        if not products_by_id:
+            return
+
+        # Get latest versions for these products
+        version_ids = []
+        for version in get_versions(project_name, product_ids=list(products_by_id.keys())):
+            version_ids.append(version["id"])
+
+        if not version_ids:
+            return
+
+        # Get all representations for these versions
+        repre_ids = []
+        for repre in get_representations(project_name, version_ids=version_ids):
+            repre_ids.append(repre["id"])
+
+        if not repre_ids:
+            return
+
+        # Check which ones are OK on remote but not present on local
+        repre_states = self.addon._get_repres_state(
+            project_name,
+            repre_ids,
+            local_site,
+            remote_site
+        )
+
+        added_count = 0
+        for repre_state in repre_states:
+            remote_status = repre_state["remoteStatus"]["status"]
+            local_status = repre_state["localStatus"]["status"]
+
+            # If representation is available on remote but not on local, add it
+            if remote_status == SiteSyncStatus.OK and local_status == SiteSyncStatus.NOT_AVAILABLE:
+                repre_id = repre_state["representationId"]
+                try:
+                    self.addon.add_site(
+                        project_name,
+                        repre_id,
+                        local_site,
+                        status=SiteSyncStatus.QUEUED
+                    )
+                    added_count += 1
+                    self.log.info(
+                        f"Auto-added {repre_id} to local site for download"
+                    )
+                except Exception as e:
+                    self.log.warning(
+                        f"Failed to auto-add {repre_id}: {e}"
+                    )
+
+        if added_count > 0:
+            filter_msg = "ALL types" if sync_all_types else str(auto_sync_types)
+            self.log.info(
+                f"Auto-discovered {added_count} new representations ({filter_msg})"
+            )
+
     async def _sync_project(self, project_name):
         self.log.info(f"Processing '{project_name}'")
         preset = self.addon.sync_project_settings[project_name]
@@ -500,6 +607,11 @@ class SiteSyncThread(threading.Thread):
         )
         if not local_site or not remote_site:
             return
+
+        # Auto-discover new representations on remote site based on product type filter
+        await self._auto_discover_representations(
+            project_name, local_site, remote_site, preset
+        )
 
         remote_site_preset = preset.get("sites")[remote_site]
 
